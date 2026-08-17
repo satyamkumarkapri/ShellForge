@@ -4,8 +4,12 @@
 #include <readline/readline.h>
 #include <readline/history.h>
 
+#include "history.h"
+#include "token.h"
+#include "lexer.h"
+
 /* Function to print command history */
-void print_history_list()
+void print_history_list(void)
 {
     HIST_ENTRY **hist = history_list();
 
@@ -25,12 +29,14 @@ void print_history_list()
     printf("-----------------------------\n");
 }
 
-int main()
+int main(void)
 {
     printf("=====================================\n");
     printf("          ShellForge\n");
     printf("   A Unix Style Shell Written in C\n");
     printf("=====================================\n");
+
+    token_list_t tokens;
 
     using_history();
 
@@ -71,7 +77,11 @@ int main()
         /* Save command to history */
         add_history(line);
 
-        printf("YOU ENTERED : %s\n", line);
+        /* Lex command */
+        lexer(line, &tokens);
+
+        /* Print tokens */
+        token_print(&tokens);
 
         free(line);
     }
