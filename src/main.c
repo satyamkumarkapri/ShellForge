@@ -18,6 +18,14 @@ int main(void)
     printf("      Shellforge \n");
     printf(" A Unix Style Shell written in C\n");
     printf("=====================================\n");
+
+ /* =============================================
+       INSTALL BACKGROUND PROCESS HANDLER
+       ============================================= */
+
+    setup_background_handler();
+
+
  using_history();
  token_list_t tokens;
  pipeline_t pipeline;
@@ -76,3 +84,4 @@ int main(void)
     }
     return 0;
 }
+
