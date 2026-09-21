@@ -1,59 +1,42 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include "builtin.h"
+
 #include "executor.h"
+#include "builtin.h"
 
 
-/*
- * Execute one command.
- *
- * Returns:
- *      0  -> success
- *     -1  -> error
- */
+/* =========================================================
+   EXECUTE SINGLE COMMAND
+   ========================================================= */
+
 int execute_command(command_t *cmd)
 {
     pid_t pid;
     int status;
 
-
-    /*
-     * Check whether the command is valid.
-     */
     if (cmd == NULL || cmd->argc == 0)
     {
         return -1;
     }
 
 
-    /*
-     * ------------------------------------------------
-     * Check for built-in command
-     * ------------------------------------------------
-     *
-     * Built-ins such as cd, pwd, echo and exit
-     * are handled by the shell itself.
-     */
+    /* Built-in command */
+
     if (is_builtin(cmd))
     {
         return execute_builtin(cmd);
     }
 
 
-    /*
-     * ------------------------------------------------
-     * Create a child process
-     * ------------------------------------------------
-     */
+    /* Create child */
+
     pid = fork();
 
-
-    /*
-     * fork() failed
-     */
     if (pid < 0)
     {
         perror("fork");
@@ -61,97 +44,305 @@ int execute_command(command_t *cmd)
     }
 
 
-    /*
-     * ------------------------------------------------
-     * CHILD PROCESS
-     * ------------------------------------------------
-     */
+    /* Child process */
+
     if (pid == 0)
     {
-        /*
-         * execvp() expects:
-         *
-         * argv[0] = command
-         * argv[1] = argument
-         * ...
-         * argv[argc] = NULL
-         */
-
         char *args[MAX_ARGS + 1];
 
-
-        /*
-         * Convert our 2D character array into
-         * an array of pointers.
-         */
         for (int i = 0; i < cmd->argc; i++)
         {
             args[i] = cmd->argv[i];
         }
 
-
-        /*
-         * execvp() requires NULL termination.
-         */
         args[cmd->argc] = NULL;
 
 
-        /*
-         * Replace the child process with
-         * the requested external command.
-         */
         execvp(args[0], args);
 
 
-        /*
-         * If execvp() returns, execution failed.
-         */
-        perror("Shellforge");
+        perror(args[0]);
 
-        exit(EXIT_FAILURE);
+        _exit(127);
     }
 
 
-    /*
-     * ------------------------------------------------
-     * PARENT PROCESS
-     * ------------------------------------------------
-     */
+    /* Parent process */
 
-    /*
-     * Wait for the child process to finish.
-     */
-    if (waitpid(pid, &status, 0) == -1)
+    if (waitpid(pid, &status, 0) < 0)
     {
         perror("waitpid");
         return -1;
     }
 
 
-    /*
-     * Check how the child terminated.
-     */
     if (WIFEXITED(status))
     {
-        /*
-         * Return child's exit status.
-         */
         return WEXITSTATUS(status);
     }
 
 
-    /*
-     * Child terminated abnormally.
-     */
-    if (WIFSIGNALED(status))
-    {
-        fprintf(stderr,
-                "Process terminated by signal %d\n",
-                WTERMSIG(status));
+    return -1;
+}
 
+
+/* =========================================================
+   EXECUTE PIPELINE
+   ========================================================= */
+
+int execute_pipeline(pipeline_t *pipeline)
+{
+    int previous_read = -1;
+
+    pid_t pids[MAX_COMMANDS];
+
+    int command_count;
+
+
+    if (pipeline == NULL)
+    {
         return -1;
     }
 
 
-    return 0;
+    command_count = pipeline->command_count;
+
+
+    if (command_count == 0)
+    {
+        return -1;
+    }
+
+
+    /*
+     * If there is only one command,
+     * execute it normally.
+     */
+
+    if (command_count == 1)
+    {
+        return execute_command(&pipeline->commands[0]);
+    }
+
+
+    /*
+     * Multi-command pipeline
+     */
+
+    for (int i = 0; i < command_count; i++)
+    {
+        int pipefd[2];
+
+
+        /*
+         * Create pipe unless this is
+         * the last command.
+         */
+
+        if (i < command_count - 1)
+        {
+            if (pipe(pipefd) == -1)
+            {
+                perror("pipe");
+                return -1;
+            }
+        }
+
+
+        /*
+         * Create child process
+         */
+
+        pids[i] = fork();
+
+        if (pids[i] < 0)
+        {
+            perror("fork");
+            return -1;
+        }
+
+
+        /* ================================================
+           CHILD PROCESS
+           ================================================ */
+
+        if (pids[i] == 0)
+        {
+            command_t *cmd =
+                &pipeline->commands[i];
+
+
+            /*
+             * --------------------------------------------
+             * INPUT REDIRECTION
+             * --------------------------------------------
+             *
+             * If this is not the first command,
+             * receive input from the previous pipe.
+             */
+
+            if (previous_read != -1)
+            {
+                if (dup2(previous_read,
+                         STDIN_FILENO) == -1)
+                {
+                    perror("dup2 input");
+                    _exit(EXIT_FAILURE);
+                }
+            }
+
+
+            /*
+             * --------------------------------------------
+             * OUTPUT REDIRECTION
+             * --------------------------------------------
+             *
+             * If this is not the last command,
+             * send output into the current pipe.
+             */
+
+            if (i < command_count - 1)
+            {
+                if (dup2(pipefd[1],
+                         STDOUT_FILENO) == -1)
+                {
+                    perror("dup2 output");
+                    _exit(EXIT_FAILURE);
+                }
+            }
+
+
+            /*
+             * Close inherited descriptors.
+             */
+
+            if (previous_read != -1)
+            {
+                close(previous_read);
+            }
+
+
+            if (i < command_count - 1)
+            {
+                close(pipefd[0]);
+                close(pipefd[1]);
+            }
+
+
+            /*
+             * Convert Shellforge argv
+             * into execvp argument format.
+             */
+
+            char *args[MAX_ARGS + 1];
+
+            for (int j = 0;
+                 j < cmd->argc;
+                 j++)
+            {
+                args[j] = cmd->argv[j];
+            }
+
+            args[cmd->argc] = NULL;
+
+
+            /*
+             * Built-ins inside a pipe.
+             *
+             * Note:
+             * cd inside a pipeline will only
+             * affect this child process.
+             */
+
+            if (is_builtin(cmd))
+            {
+                int result =
+                    execute_builtin(cmd);
+
+                _exit(result == 0 ? 0 : 1);
+            }
+
+
+            /*
+             * Execute external command.
+             */
+
+            execvp(args[0], args);
+
+
+            perror(args[0]);
+
+            _exit(127);
+        }
+
+
+        /* ================================================
+           PARENT PROCESS
+           ================================================ */
+
+
+        /*
+         * Parent no longer needs
+         * the previous pipe read end.
+         */
+
+        if (previous_read != -1)
+        {
+            close(previous_read);
+        }
+
+
+        /*
+         * Parent keeps the read end of the
+         * current pipe for the next command.
+         */
+
+        if (i < command_count - 1)
+        {
+            close(pipefd[1]);
+
+            previous_read = pipefd[0];
+        }
+        else
+        {
+            previous_read = -1;
+        }
+    }
+
+
+    /*
+     * Wait for every child process.
+     */
+
+    int final_status = 0;
+
+    for (int i = 0; i < command_count; i++)
+    {
+        int status;
+
+        if (waitpid(pids[i],
+                    &status,
+                    0) < 0)
+        {
+            perror("waitpid");
+            continue;
+        }
+
+
+        /*
+         * Save status of the last command.
+         */
+
+        if (i == command_count - 1)
+        {
+            if (WIFEXITED(status))
+            {
+                final_status =
+                    WEXITSTATUS(status);
+            }
+        }
+    }
+
+
+    return final_status;
 }
